@@ -1,13 +1,11 @@
 var express = require('express');
-var Search = require('bing.search');
-var search = new Search(process.env.BING_API_KEY);
+var https = require('https');
+var urllib = require('url');
 
 var app = express();
-
 var port = process.env.PORT || 8080;
 
 var MongoClient = require('mongodb').MongoClient; // save as 4 char base64 url safe string
-
 var url = process.env.MONGODB_URL;
 var collectionName = "searches";
 
@@ -26,6 +24,37 @@ var collection = function( name ) {
   return db.collection( name );
 };
 
+var getImages = function (apiKey, searchQuery, offset, cb) {
+    offset = offset || 0;
+    https.get({
+      host: 'api.cognitive.microsoft.com',
+      path: '/bing/v5.0/images/search?q=' + encodeURIComponent(searchQuery) + "&offset=" + offset.toString(),
+      headers: {"Ocp-Apim-Subscription-Key": apiKey}
+    }, getResponse => {
+        //console.log("API got response code", getResponse.statusCode);
+        
+        var results = "";
+        getResponse.on('data', data => {
+            results += data.toString();
+        });
+        getResponse.on('error', err => {
+            return cb(err);
+        });
+        getResponse.on('end', () => {
+            //console.log("Received reply of " + results.length + " bytes long.");
+            var resultsObj = JSON.parse(results);
+            var queryResults = [];
+            resultsObj.value.forEach(item => {
+                queryResults.push({
+                    "url": urllib.parse(item.contentUrl, true).query.r,
+                    "context": urllib.parse(item.hostPageUrl, true).query.r,
+                    "description": item.name
+                });
+            });
+            return cb(null, queryResults);
+        });
+    });
+};
 
 app.get('/', (req, res) => {
     res.end("Access the api with a search query in the url for images you with to find:\n\n" +
@@ -36,30 +65,25 @@ app.get('/', (req, res) => {
 
 app.get('/api/imagesearch/:query', (req, res) => {
     var searchQuery = req.params.query;
-    var queryResults = [];
-    console.log("GET imagesearch triggered.");
+    var offsetValue = (req.query.offset * 50) || 0; // pages are 50 items long, so offset is pages.
+    console.log("GET imagesearch triggered: ", searchQuery, "offset:", offsetValue);
     
-    search.images(
+    getImages(
+        process.env.BING_API_KEY,
         searchQuery,
-        {"skip": req.params.offset || 0},
+        offsetValue,
         (err, results) => {
             if (err) {
                 console.log(err);
                 return res.status(500).end();
             }
             console.log("BING RESULTS:\n\n", results);
-            results.forEach(item => {
-                queryResults.push({
-                    "url": item.sourceUrl,
-                    "context": item.displayUrl,
-                    "description": item.title
-                });
-            });
             collection(collectionName).findOne({
                 "query": searchQuery
             }, (err, data) => {
                 if (err) return res.status(500).end();
                 if (data) {
+                    console.log("Found data. Updating...");
                     collection(collectionName).update({
                         "query": data.query
                     },
@@ -83,15 +107,15 @@ app.get('/api/imagesearch/:query', (req, res) => {
                     });
                 }
             });
-            res.json(queryResults);
+            res.json(results);
         });
 });
 
 app.get('/api/imagesearchhistory', (req, res) => {
-    collection(collectionName).find(
-        {},
+    collection(collectionName).find().toArray(
         (err, results) => {
             if (err) res.status(500).end("Server Error");
+            console.log(results);
             res.json(results);
         }
     );
